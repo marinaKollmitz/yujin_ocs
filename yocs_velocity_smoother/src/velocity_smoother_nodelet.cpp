@@ -27,7 +27,7 @@
 
 #define PERIOD_RECORD_SIZE    5
 #define ZERO_VEL_COMMAND      geometry_msgs::Twist();
-#define IS_ZERO_VEOCITY(a)   ((a.linear.x == 0.0) && (a.angular.z == 0.0))
+#define IS_ZERO_VEOCITY(a)   ((a.linear.x == 0.0) && (a.linear.y == 0) && (a.angular.z == 0.0))
 
 /*****************************************************************************
 ** Namespaces
@@ -50,15 +50,20 @@ VelocitySmoother::VelocitySmoother(const std::string &name)
 
 void VelocitySmoother::reconfigCB(yocs_velocity_smoother::paramsConfig &config, uint32_t level)
 {
-  ROS_INFO("Reconfigure request : %f %f %f %f %f",
-           config.speed_lim_v, config.speed_lim_w, config.accel_lim_v, config.accel_lim_w, config.decel_factor);
+  ROS_INFO("Reconfigure request : %f %f %f %f %f %f %f",
+           config.speed_lim_x, config.speed_lim_y, config.speed_lim_w,
+           config.accel_lim_x, config.accel_lim_y, config.accel_lim_w, config.decel_factor);
 
-  speed_lim_v  = config.speed_lim_v;
+  speed_lim_x  = config.speed_lim_x;
+  speed_lim_y  = config.speed_lim_y;
   speed_lim_w  = config.speed_lim_w;
-  accel_lim_v  = config.accel_lim_v;
+
+  accel_lim_x  = config.accel_lim_x;
+  speed_lim_y  = config.speed_lim_y;
   accel_lim_w  = config.accel_lim_w;
   decel_factor = config.decel_factor;
-  decel_lim_v  = decel_factor*accel_lim_v;
+  decel_lim_x  = decel_factor*accel_lim_x;
+  decel_lim_y  = decel_factor*accel_lim_y;
   decel_lim_w  = decel_factor*accel_lim_w;
 }
 
@@ -94,7 +99,9 @@ void VelocitySmoother::velocityCB(const geometry_msgs::Twist::ConstPtr& msg)
 
   // Bound speed with the maximum values
   target_vel.linear.x  =
-      msg->linear.x  > 0.0 ? std::min(msg->linear.x,  speed_lim_v) : std::max(msg->linear.x,  -speed_lim_v);
+      msg->linear.x  > 0.0 ? std::min(msg->linear.x,  speed_lim_x) : std::max(msg->linear.x,  -speed_lim_x);
+  target_vel.linear.y  =
+      msg->linear.y  > 0.0 ? std::min(msg->linear.y,  speed_lim_y) : std::max(msg->linear.y,  -speed_lim_y);
   target_vel.angular.z =
       msg->angular.z > 0.0 ? std::min(msg->angular.z, speed_lim_w) : std::max(msg->angular.z, -speed_lim_w);
 }
@@ -134,7 +141,8 @@ void VelocitySmoother::spin()
       if (IS_ZERO_VEOCITY(target_vel) == false)
       {
         ROS_WARN_STREAM("Velocity Smoother : input got inactive leaving us a non-zero target velocity ("
-              << target_vel.linear.x << ", " << target_vel.angular.z << "), zeroing...[" << name << "]");
+                        << target_vel.linear.x << ", " << target_vel.linear.y << ", "
+                        << target_vel.angular.z << "), zeroing...[" << name << "]");
         target_vel = ZERO_VEL_COMMAND;
       }
     }
@@ -151,10 +159,11 @@ void VelocitySmoother::spin()
       // be proportional to max v and w...
       // The one for angular velocity is very big because is it's less necessary (for example the
       // reactive controller will never make the robot spin) and because the gyro has a 15 ms delay
-      ROS_WARN("Using robot velocity feedback (%s) instead of last command: %f, %f, %f",
+      ROS_WARN("Using robot velocity feedback (%s) instead of last command: %f, %f, %f, %f",
                 robot_feedback == ODOMETRY ? "odometry" : "end commands",
                (ros::Time::now()      - last_cb_time).toSec(),
                 current_vel.linear.x  - last_cmd_vel.linear.x,
+                current_vel.linear.y  - last_cmd_vel.linear.y,
                 current_vel.angular.z - last_cmd_vel.angular.z);
       last_cmd_vel = current_vel;
     }
@@ -162,22 +171,34 @@ void VelocitySmoother::spin()
     geometry_msgs::TwistPtr cmd_vel;
 
     if ((target_vel.linear.x  != last_cmd_vel.linear.x) ||
+        (target_vel.linear.y  != last_cmd_vel.linear.y) ||
         (target_vel.angular.z != last_cmd_vel.angular.z))
     {
       // Try to reach target velocity ensuring that we don't exceed the acceleration limits
       cmd_vel.reset(new geometry_msgs::Twist(target_vel));
 
-      double v_inc, w_inc, max_v_inc, max_w_inc;
+      double vel_x_inc, vel_y_inc, w_inc, max_vel_x_inc, max_vel_y_inc, max_w_inc;
 
-      v_inc = target_vel.linear.x - last_cmd_vel.linear.x;
+      vel_x_inc = target_vel.linear.x - last_cmd_vel.linear.x;
       if ((robot_feedback == ODOMETRY) && (current_vel.linear.x*target_vel.linear.x < 0.0))
       {
         // countermarch (on robots with significant inertia; requires odometry feedback to be detected)
-        max_v_inc = decel_lim_v*period;
+        max_vel_x_inc = decel_lim_x*period;
       }
       else
       {
-        max_v_inc = ((v_inc*target_vel.linear.x > 0.0)?accel_lim_v:decel_lim_v)*period;
+        max_vel_x_inc = ((vel_x_inc*target_vel.linear.x > 0.0)?accel_lim_x:decel_lim_x)*period;
+      }
+
+      vel_y_inc = target_vel.linear.y - last_cmd_vel.linear.y;
+      if ((robot_feedback == ODOMETRY) && (current_vel.linear.y*target_vel.linear.y < 0.0))
+      {
+        // countermarch (on robots with significant inertia; requires odometry feedback to be detected)
+        max_vel_y_inc = decel_lim_y*period;
+      }
+      else
+      {
+        max_vel_y_inc = ((vel_y_inc*target_vel.linear.y > 0.0)?accel_lim_y:decel_lim_y)*period;
       }
 
       w_inc = target_vel.angular.z - last_cmd_vel.angular.z;
@@ -191,33 +212,40 @@ void VelocitySmoother::spin()
         max_w_inc = ((w_inc*target_vel.angular.z > 0.0)?accel_lim_w:decel_lim_w)*period;
       }
 
-      // Calculate and normalise vectors A (desired velocity increment) and B (maximum velocity increment),
-      // where v acts as coordinate x and w as coordinate y; the sign of the angle from A to B determines
-      // which velocity (v or w) must be overconstrained to keep the direction provided as command
-      double MA = sqrt(    v_inc *     v_inc +     w_inc *     w_inc);
-      double MB = sqrt(max_v_inc * max_v_inc + max_w_inc * max_w_inc);
+      //Marina: not necessary for omnidirectional robots
+//      // Calculate and normalise vectors A (desired velocity increment) and B (maximum velocity increment),
+//      // where v acts as coordinate x and w as coordinate y; the sign of the angle from A to B determines
+//      // which velocity (v or w) must be overconstrained to keep the direction provided as command
+//      double MA = sqrt(    vel_x_inc *     vel_x_inc +     w_inc *     w_inc);
+//      double MB = sqrt(max_vel_x_inc * max_vel_x_inc + max_w_inc * max_w_inc);
 
-      double Av = std::abs(v_inc) / MA;
-      double Aw = std::abs(w_inc) / MA;
-      double Bv = max_v_inc / MB;
-      double Bw = max_w_inc / MB;
-      double theta = atan2(Bw, Bv) - atan2(Aw, Av);
+//      double Av = std::abs(vel_x_inc) / MA;
+//      double Aw = std::abs(w_inc) / MA;
+//      double Bv = max_vel_x_inc / MB;
+//      double Bw = max_w_inc / MB;
+//      double theta = atan2(Bw, Bv) - atan2(Aw, Av);
 
-      if (theta < 0)
+//      if (theta < 0)
+//      {
+//        // overconstrain linear velocity
+//        max_vel_x_inc = (max_w_inc*std::abs(vel_x_inc))/std::abs(w_inc);
+//      }
+//      else
+//      {
+//        // overconstrain angular velocity
+//        max_w_inc = (max_vel_x_inc*std::abs(w_inc))/std::abs(vel_x_inc);
+//      }
+
+      if (std::abs(vel_x_inc) > max_vel_x_inc)
       {
-        // overconstrain linear velocity
-        max_v_inc = (max_w_inc*std::abs(v_inc))/std::abs(w_inc);
+        // we must limit linear velocity in x
+        cmd_vel->linear.x  = last_cmd_vel.linear.x  + sign(vel_x_inc)*max_vel_x_inc;
       }
-      else
-      {
-        // overconstrain angular velocity
-        max_w_inc = (max_v_inc*std::abs(w_inc))/std::abs(v_inc);
-      }
 
-      if (std::abs(v_inc) > max_v_inc)
+      if (std::abs(vel_y_inc) > max_vel_y_inc)
       {
-        // we must limit linear velocity
-        cmd_vel->linear.x  = last_cmd_vel.linear.x  + sign(v_inc)*max_v_inc;
+        // we must limit linear velocity in y
+        cmd_vel->linear.y  = last_cmd_vel.linear.y  + sign(vel_y_inc)*max_vel_y_inc;
       }
 
       if (std::abs(w_inc) > max_w_inc)
@@ -269,14 +297,16 @@ bool VelocitySmoother::init(ros::NodeHandle& nh)
   robot_feedback = static_cast<RobotFeedbackType>(feedback);
 
   // Mandatory parameters
-  if ((nh.getParam("speed_lim_v", speed_lim_v) == false) ||
+  if ((nh.getParam("speed_lim_x", speed_lim_x) == false) ||
+      (nh.getParam("speed_lim_y", speed_lim_y) == false) ||
       (nh.getParam("speed_lim_w", speed_lim_w) == false))
   {
     ROS_ERROR("Missing velocity limit parameter(s)");
     return false;
   }
 
-  if ((nh.getParam("accel_lim_v", accel_lim_v) == false) ||
+  if ((nh.getParam("accel_lim_x", accel_lim_x) == false) ||
+      (nh.getParam("accel_lim_y", accel_lim_y) == false) ||
       (nh.getParam("accel_lim_w", accel_lim_w) == false))
   {
     ROS_ERROR("Missing acceleration limit parameter(s)");
@@ -284,7 +314,8 @@ bool VelocitySmoother::init(ros::NodeHandle& nh)
   }
 
   // Deceleration can be more aggressive, if necessary
-  decel_lim_v = decel_factor*accel_lim_v;
+  decel_lim_x = decel_factor*accel_lim_x;
+  decel_lim_y = decel_factor*accel_lim_y;
   decel_lim_w = decel_factor*accel_lim_w;
 
   // Publishers and subscribers
