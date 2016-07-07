@@ -140,7 +140,7 @@ void CmdVelMuxNodelet::reloadConfiguration(yocs_cmd_vel_mux::reloadConfig &confi
     *node >> output_name;
   }
 #endif
-  mux_cmd_vel_pub = nh_priv.advertise <geometry_msgs::Twist> (output_name, 10);
+  mux_cmd_vel_pub = nh.advertise <geometry_msgs::Twist> (output_name, 10);
 
   /*********************
   ** Input Subscribers
@@ -159,7 +159,7 @@ void CmdVelMuxNodelet::reloadConfiguration(yocs_cmd_vel_mux::reloadConfig &confi
   for (unsigned int i = 0; i < cmd_vel_sub.size(); i++)
   {
     cmd_vel_sub[i].subs =
-        nh_priv.subscribe<geometry_msgs::Twist>(cmd_vel_sub[i].topic, 10, CmdVelFunctor(i, this));
+        nh.subscribe<geometry_msgs::Twist>(cmd_vel_sub[i].topic, 10, CmdVelFunctor(i, this));
 
     // Create (stopped by now) a one-shot timer for every subscriber
     cmd_vel_sub[i].timer =
